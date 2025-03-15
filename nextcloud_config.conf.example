@@ -1,0 +1,11 @@
+# Nextcloud instance URL (without https://)
+NC_URL="cloud.example.com"
+
+# Admin username for Nextcloud
+NC_USER="admin"
+
+# Admin password for Nextcloud
+NC_PASS="your_secure_password"
+
+# Default group for new users
+NC_GROUP="Default Group" 
