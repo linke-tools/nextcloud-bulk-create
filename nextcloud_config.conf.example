@@ -9,3 +9,6 @@ NC_PASS="your_secure_password"
 
 # Default group for new users
 NC_GROUP="Default Group" 
+
+# Suffix for userid
+NC_USERID_SUFFIX=""
