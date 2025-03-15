@@ -61,15 +61,11 @@ check_response() {
 # Function to show usage information
 show_usage() {
     cat << EOF
-Usage: $(basename "$0") [--do] <nextcloud_url> <username> <password> <group> <csv_file>
+Usage: $(basename "$0") [--do] <csv_file>
 
-Create Nextcloud users from a CSV file.
+Create Nextcloud users from a CSV file using configuration from nextcloud_config.conf.
 
 Arguments:
-    nextcloud_url     URL of the Nextcloud instance
-    username         Admin username for Nextcloud
-    password         Admin password for Nextcloud
-    group           Group to assign new users to
     csv_file        Path to CSV file containing user data
 
 Options:
@@ -80,15 +76,18 @@ The CSV file must contain the following columns:
     - FIRST NAME
     - LAST NAME
     - EMAIL ADDRESS
+    - EXTERNAL ID
 
-Configuration can also be provided in nextcloud_config.conf with the following variables:
-    NC_URL          Nextcloud URL
-    NC_USER         Admin username
-    NC_PASS         Admin password
-    NC_GROUP        Default group
+Configuration must be provided in nextcloud_config.conf with the following variables:
+    NC_URL           Nextcloud URL
+    NC_USER          Admin username
+    NC_PASS          Admin password
+    NC_GROUP         Default group
+    NC_USERID_SUFFIX Suffix to append to userids
 
 Example:
-    $(basename "$0") nextcloud.example.com admin password "Default Group" users.csv --do
+    $(basename "$0") users.csv          # Dry run
+    $(basename "$0") --do users.csv     # Actually create users
 EOF
     exit 1
 }
@@ -96,21 +95,24 @@ EOF
 # Default values
 DO_CREATE=false
 CONFIG_FILE="nextcloud_config.conf"
+NC_USERID_SUFFIX=""  # Default suffix if not configured
 
-# Show usage if no arguments provided or help requested
+# Show usage if help requested
 case "$1" in
-    ""|"-h"|"--help")
+    -h|--help)
         show_usage
         ;;
 esac
 
-# Load configuration file if it exists
-if [ -f "$CONFIG_FILE" ]; then
-    verbose "Loading configuration from $CONFIG_FILE"
-    source "$CONFIG_FILE"
+# Load configuration file - it's required now
+if [ ! -f "$CONFIG_FILE" ]; then
+    error "Configuration file $CONFIG_FILE not found"
 fi
 
-# Parse command line arguments
+verbose "Loading configuration from $CONFIG_FILE"
+source "$CONFIG_FILE"
+
+# Parse only --do flag and get CSV path
 while [[ $# -gt 0 ]]; do
     case $1 in
         --do)
@@ -121,28 +123,23 @@ while [[ $# -gt 0 ]]; do
             show_usage
             ;;
         *)
-            if [ -z "$NC_URL" ]; then
-                NC_URL="$1"
-            elif [ -z "$NC_USER" ]; then
-                NC_USER="$1"
-            elif [ -z "$NC_PASS" ]; then
-                NC_PASS="$1"
-            elif [ -z "$NC_GROUP" ]; then
-                NC_GROUP="$1"
-            elif [ -z "$CSV_FILE" ]; then
+            if [ -z "$CSV_FILE" ]; then
                 CSV_FILE="$1"
+            else
+                error "Unknown argument: $1"
             fi
             shift
             ;;
     esac
 done
 
-# Validate required parameters and format
-[ -z "$NC_URL" ] && error "Nextcloud URL is required"
-[ -z "$NC_USER" ] && error "Nextcloud username is required"
-[ -z "$NC_PASS" ] && error "Nextcloud password is required"
-[ -z "$NC_GROUP" ] && error "Nextcloud group is required"
-[ -z "$CSV_FILE" ] && error "CSV file path is required"
+# Validate required parameters
+[ -z "$NC_URL" ] && error "Nextcloud URL is required in config file"
+[ -z "$NC_USER" ] && error "Nextcloud username is required in config file"
+[ -z "$NC_PASS" ] && error "Nextcloud password is required in config file"
+[ -z "$NC_GROUP" ] && error "Nextcloud group is required in config file"
+[ -z "$NC_USERID_SUFFIX" ] && error "UserID suffix is required in config file"
+[ -z "$CSV_FILE" ] && error "CSV file path is required as argument"
 [ ! -f "$CSV_FILE" ] && error "CSV file does not exist: $CSV_FILE"
 
 # Validate and show configuration before connecting
@@ -150,7 +147,17 @@ verbose "Using configuration:"
 verbose "  URL: $NC_URL"
 verbose "  User: $NC_USER"
 verbose "  Group: $NC_GROUP"
+verbose "  UserID Suffix: $NC_USERID_SUFFIX"
 verbose "  CSV File: $CSV_FILE"
+verbose "  Create Users: $([ "$DO_CREATE" = true ] && echo "yes" || echo "no (dry run)")"
+
+# Prompt for confirmation
+echo
+echo "Do you want to continue with these settings? [y/N] "
+read -r response
+if [[ ! "$response" =~ ^[yY]$ ]]; then
+    error "Aborted by user"
+fi
 
 # Remove any trailing slashes from URL and ensure it doesn't start with https://
 NC_URL="${NC_URL%/}"
@@ -204,6 +211,9 @@ verbose "Found ${#EXISTING_EMAILS[@]} unique email addresses and ${#EXISTING_USE
 # Add counter for userid conflicts
 skipped_existing_userid=0
 
+# Add counter for external ID conflicts
+skipped_existing_external_id=0
+
 # Process CSV file
 verbose "Processing CSV file..."
 
@@ -224,8 +234,8 @@ for i in "${!headers[@]}"; do
     field_positions[$clean_header]=$i
 done
 
-# Check required fields
-required_fields=("FIRST_NAME" "LAST_NAME" "EMAIL_ADDRESS")
+# Update required fields
+required_fields=("FIRST_NAME" "LAST_NAME" "EMAIL_ADDRESS" "EXTERNAL_ID")
 for field in "${required_fields[@]}"; do
     [ -z "${field_positions[$field]}" ] && error "Required field $field not found in CSV"
 done
@@ -238,10 +248,12 @@ while IFS=',' read -r -a fields; do
     email="${fields[${field_positions[EMAIL_ADDRESS]}]}"
     first_name="${fields[${field_positions[FIRST_NAME]}]}"
     last_name="${fields[${field_positions[LAST_NAME]}]}"
+    external_id="${fields[${field_positions[EXTERNAL_ID]}]}"
+    display_name="$first_name $last_name"
     
     # Skip if email is empty
     if [ -z "$email" ]; then
-        verbose "Skipping user with empty email: $first_name $last_name"
+        verbose "Skipping user with empty email: $display_name"
         ((skipped_no_email++))
         continue
     fi
@@ -253,20 +265,29 @@ while IFS=',' read -r -a fields; do
         continue
     fi
     
-    userid="$first_name $last_name"
-    # Skip if userid already exists
-    if [ -n "${EXISTING_USERIDS[$userid]}" ]; then
-        verbose "Skipping user with existing userid: $userid"
+    # Skip if external ID already exists as userid
+    if [ -n "${EXISTING_USERIDS[${external_id}${NC_USERID_SUFFIX}]}" ]; then
+        verbose "Skipping user with existing external ID as userid: ${external_id}${NC_USERID_SUFFIX}"
+        ((skipped_existing_external_id++))
+        continue
+    fi
+    
+    # Skip if display name exists as userid
+    if [ -n "${EXISTING_USERIDS[$display_name]}" ]; then
+        verbose "Skipping user with existing display name as userid: $display_name"
         ((skipped_existing_userid++))
         continue
     fi
     
+    # Use external ID as userid with suffix
+    userid="${external_id}${NC_USERID_SUFFIX}"
     encoded_userid=$(urlencode "$userid")
     encoded_email=$(urlencode "$email")
     encoded_group=$(urlencode "$NC_GROUP")
+    encoded_display_name=$(urlencode "$display_name")
     
     if [ "$DO_CREATE" = true ]; then
-        verbose "Creating user: $userid (email: $email)"
+        verbose "Creating user: $userid (display name: $display_name, email: $email)"
         response=$(curl -s -X POST "https://${ENCODED_USER}:${ENCODED_PASS}@${NC_URL}/ocs/v1.php/cloud/users" \
             -d "userid=$encoded_userid" \
             -d "email=$encoded_email" \
@@ -275,8 +296,24 @@ while IFS=',' read -r -a fields; do
         
         status=$(echo "$response" | xmllint --xpath '//meta/status/text()' - 2>/dev/null)
         if [ "$status" = "ok" ]; then
-            verbose "Successfully created user: $userid (email: $email)"
-            ((created_success++))
+            verbose "Successfully created user: $userid"
+            # Set display name
+            verbose "Setting display name for $userid..."
+            response=$(curl -s -X PUT "https://${ENCODED_USER}:${ENCODED_PASS}@${NC_URL}/ocs/v1.php/cloud/users/${encoded_userid}" \
+                -d "key=displayname" \
+                -d "value=$encoded_display_name" \
+                -H "OCS-APIRequest: true")
+            
+            status=$(echo "$response" | xmllint --xpath '//meta/status/text()' - 2>/dev/null)
+            if [ "$status" = "ok" ]; then
+                verbose "Successfully set display name to: $display_name"
+                ((created_success++))
+            else
+                message=$(echo "$response" | xmllint --xpath '//meta/message/text()' - 2>/dev/null)
+                echo "[WARNING] Created user but failed to set display name for $userid: $message"
+                ((created_success++))
+                ((error_reasons["Failed to set display name: $message"]++))
+            fi
         else
             message=$(echo "$response" | xmllint --xpath '//meta/message/text()' - 2>/dev/null)
             echo "[WARNING] Failed to create user $userid (email: $email): $message"
@@ -284,7 +321,7 @@ while IFS=',' read -r -a fields; do
             ((error_reasons["$message"]++))
         fi
     else
-        verbose "Would create user: $userid (email: $email) (dry run)"
+        verbose "Would create user: $userid (display name: $display_name, email: $email) (dry run)"
         ((created_success++))  # Count as success in dry run
     fi
     
@@ -301,7 +338,8 @@ else
 fi
 echo "Users skipped (no email): $skipped_no_email"
 echo "Users skipped (existing email): $skipped_existing_email"
-echo "Users skipped (existing userid): $skipped_existing_userid"
+echo "Users skipped (existing external ID as userid): $skipped_existing_external_id"
+echo "Users skipped (existing display name as userid): $skipped_existing_userid"
 echo "Failed creation attempts: $created_failed"
 
 if [ ${#error_reasons[@]} -gt 0 ]; then
