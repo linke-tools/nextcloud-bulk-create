@@ -258,12 +258,6 @@ while IFS=',' read -r -a fields; do
         continue
     fi
     
-    # Skip if email already exists
-    if [ -n "${EXISTING_EMAILS[$email]}" ]; then
-        verbose "Skipping user with existing email: $email"
-        ((skipped_existing_email++))
-        continue
-    fi
     
     # Skip if external ID already exists as userid
     if [ -n "${EXISTING_USERIDS[${external_id}${NC_USERID_SUFFIX}]}" ]; then
@@ -271,7 +265,15 @@ while IFS=',' read -r -a fields; do
         ((skipped_existing_external_id++))
         continue
     fi
-    
+
+    # Skip if email already exists
+    if [ -n "${EXISTING_EMAILS[$email]}" ]; then
+        verbose "Skipping user with existing email: $email"
+        ((skipped_existing_email++))
+        continue
+    fi
+
+
     # Skip if display name exists as userid
     if [ -n "${EXISTING_USERIDS[$display_name]}" ]; then
         verbose "Skipping user with existing display name as userid: $display_name"
