@@ -182,9 +182,11 @@ check_response "$USERS_XML"
 
 # Get all existing users and their emails
 declare -A EXISTING_EMAILS
-verbose "Retrieving email addresses for existing users..."
+declare -A EXISTING_USERIDS
+verbose "Retrieving email addresses and userids for existing users..."
 while IFS= read -r userid; do
     verbose "  Checking user: $userid"
+    EXISTING_USERIDS[$userid]=1
     encoded_userid=$(urlencode "$userid")
     user_info=$(curl -s -X GET "https://${ENCODED_USER}:${ENCODED_PASS}@${NC_URL}/ocs/v1.php/cloud/users/${encoded_userid}" \
         -H "OCS-APIRequest: true")
@@ -197,7 +199,10 @@ while IFS= read -r userid; do
     fi
 done < <(echo "$USERS_XML" | xmllint --xpath '//element/text()' - 2>/dev/null)
 
-verbose "Found ${#EXISTING_EMAILS[@]} unique email addresses"
+verbose "Found ${#EXISTING_EMAILS[@]} unique email addresses and ${#EXISTING_USERIDS[@]} existing users"
+
+# Add counter for userid conflicts
+skipped_existing_userid=0
 
 # Process CSV file
 verbose "Processing CSV file..."
@@ -249,6 +254,13 @@ while IFS=',' read -r -a fields; do
     fi
     
     userid="$first_name $last_name"
+    # Skip if userid already exists
+    if [ -n "${EXISTING_USERIDS[$userid]}" ]; then
+        verbose "Skipping user with existing userid: $userid"
+        ((skipped_existing_userid++))
+        continue
+    fi
+    
     encoded_userid=$(urlencode "$userid")
     encoded_email=$(urlencode "$email")
     encoded_group=$(urlencode "$NC_GROUP")
@@ -289,6 +301,7 @@ else
 fi
 echo "Users skipped (no email): $skipped_no_email"
 echo "Users skipped (existing email): $skipped_existing_email"
+echo "Users skipped (existing userid): $skipped_existing_userid"
 echo "Failed creation attempts: $created_failed"
 
 if [ ${#error_reasons[@]} -gt 0 ]; then
