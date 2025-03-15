@@ -202,6 +202,14 @@ verbose "Found ${#EXISTING_EMAILS[@]} unique email addresses"
 # Process CSV file
 verbose "Processing CSV file..."
 
+# Statistics counters
+declare -A error_reasons
+total_processed=0
+skipped_no_email=0
+skipped_existing_email=0
+created_success=0
+created_failed=0
+
 # Read header line and create field mapping
 IFS=',' read -r -a headers < <(head -n 1 "$CSV_FILE")
 declare -A field_positions
@@ -220,6 +228,7 @@ done
 # Process data lines
 while IFS=',' read -r -a fields; do
     [ "${#fields[@]}" -eq 0 ] && continue  # Skip empty lines
+    ((total_processed++))
     
     email="${fields[${field_positions[EMAIL_ADDRESS]}]}"
     first_name="${fields[${field_positions[FIRST_NAME]}]}"
@@ -228,12 +237,14 @@ while IFS=',' read -r -a fields; do
     # Skip if email is empty
     if [ -z "$email" ]; then
         verbose "Skipping user with empty email: $first_name $last_name"
+        ((skipped_no_email++))
         continue
     fi
     
     # Skip if email already exists
     if [ -n "${EXISTING_EMAILS[$email]}" ]; then
         verbose "Skipping user with existing email: $email"
+        ((skipped_existing_email++))
         continue
     fi
     
@@ -253,14 +264,39 @@ while IFS=',' read -r -a fields; do
         status=$(echo "$response" | xmllint --xpath '//meta/status/text()' - 2>/dev/null)
         if [ "$status" = "ok" ]; then
             verbose "Successfully created user: $userid (email: $email)"
+            ((created_success++))
         else
             message=$(echo "$response" | xmllint --xpath '//meta/message/text()' - 2>/dev/null)
             echo "[WARNING] Failed to create user $userid (email: $email): $message"
+            ((created_failed++))
+            ((error_reasons["$message"]++))
         fi
     else
         verbose "Would create user: $userid (email: $email) (dry run)"
+        ((created_success++))  # Count as success in dry run
     fi
     
 done < <(tail -n +2 "$CSV_FILE")
+
+# Print summary
+echo
+echo "=== Summary ==="
+echo "Total records processed: $total_processed"
+if [ "$DO_CREATE" = true ]; then
+    echo "Users successfully created: $created_success"
+else
+    echo "Users that would be created: $created_success"
+fi
+echo "Users skipped (no email): $skipped_no_email"
+echo "Users skipped (existing email): $skipped_existing_email"
+echo "Failed creation attempts: $created_failed"
+
+if [ ${#error_reasons[@]} -gt 0 ]; then
+    echo
+    echo "Error breakdown:"
+    for reason in "${!error_reasons[@]}"; do
+        echo "  - $reason: ${error_reasons[$reason]}"
+    done
+fi
 
 verbose "Processing complete" 
