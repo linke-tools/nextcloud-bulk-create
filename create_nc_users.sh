@@ -139,6 +139,8 @@ done
 [ -z "$NC_PASS" ] && error "Nextcloud password is required in config file"
 [ -z "$NC_GROUP" ] && error "Nextcloud group is required in config file"
 [ -z "$NC_USERID_SUFFIX" ] && error "UserID suffix is required in config file"
+[ -z "$NC_RETRY_COUNT" ] && error "Retry count is required in config file"
+[ -z "$NC_RETRY_INTERVAL" ] && error "Retry interval is required in config file"
 [ -z "$CSV_FILE" ] && error "CSV file path is required as argument"
 [ ! -f "$CSV_FILE" ] && error "CSV file does not exist: $CSV_FILE"
 
@@ -148,6 +150,8 @@ verbose "  URL: $NC_URL"
 verbose "  User: $NC_USER"
 verbose "  Group: $NC_GROUP"
 verbose "  UserID Suffix: $NC_USERID_SUFFIX"
+verbose "  Retry Count: $NC_RETRY_COUNT"
+verbose "  Retry Interval: $NC_RETRY_INTERVAL seconds"
 verbose "  CSV File: $CSV_FILE"
 verbose "  Create Users: $([ "$DO_CREATE" = true ] && echo "yes" || echo "no (dry run)")"
 
@@ -240,6 +244,68 @@ for field in "${required_fields[@]}"; do
     [ -z "${field_positions[$field]}" ] && error "Required field $field not found in CSV"
 done
 
+print_summary() {
+    echo
+    echo "=== Summary ==="
+    echo "Total records processed: $total_processed"
+    if [ "$DO_CREATE" = true ]; then
+        echo "Users successfully created: $created_success"
+    else
+        echo "Users that would be created: $created_success"
+    fi
+    echo "Users skipped (no email): $skipped_no_email"
+    echo "Users skipped (existing email): $skipped_existing_email"
+    echo "Users skipped (existing external ID as userid): $skipped_existing_external_id"
+    echo "Users skipped (existing display name as userid): $skipped_existing_userid"
+    echo "Failed creation attempts: $created_failed"
+}
+
+# Function to set display name with retry logic
+set_display_name() {
+    local userid="$1"
+    local display_name="$2"
+    local encoded_userid="$3"
+    local encoded_display_name="$4"
+    
+    for ((attempt=1; attempt <= NC_RETRY_COUNT + 1; attempt++)); do
+        verbose "Setting display name for $userid (attempt $attempt of $((NC_RETRY_COUNT + 1)))..."
+        response=$(curl -s -X PUT "https://${ENCODED_USER}:${ENCODED_PASS}@${NC_URL}/ocs/v1.php/cloud/users/${encoded_userid}" \
+            -d "key=displayname" \
+            -d "value=$encoded_display_name" \
+            -H "OCS-APIRequest: true" \
+            -w "%{http_code}" \
+            -o /tmp/response.txt)
+        
+        http_code=$response
+        response_body=$(cat /tmp/response.txt)
+        rm -f /tmp/response.txt
+        
+        # Extract status and message once
+        status=$(echo "$response_body" | xmllint --xpath '//meta/status/text()' - 2>/dev/null)
+        message=$(echo "$response_body" | xmllint --xpath '//meta/message/text()' - 2>/dev/null)
+        
+        if [ "$status" = "ok" ]; then
+            verbose "Successfully set display name to: $display_name"
+            return 0
+        fi
+        
+        # Check if rate limit was hit
+        if [ "$http_code" = "429" ]; then
+            if [ "$attempt" -eq "$((NC_RETRY_COUNT + 1))" ]; then
+                echo "[ERROR] Failed to set display name for $userid: Rate limit persisted after $NC_RETRY_COUNT retries"
+                return 1
+            fi
+            verbose "Rate limit hit when setting display name for $userid. Retrying in $NC_RETRY_INTERVAL seconds..."
+            sleep $NC_RETRY_INTERVAL
+            continue
+        fi
+        
+        # Non-rate-limit error - exit immediately
+        echo "[ERROR] Failed to set display name for $userid: $message (HTTP $http_code)"
+        return 1
+    done
+}
+
 # Process data lines
 while IFS=',' read -r -a fields; do
     [ "${#fields[@]}" -eq 0 ] && continue  # Skip empty lines
@@ -299,28 +365,17 @@ while IFS=',' read -r -a fields; do
         status=$(echo "$response" | xmllint --xpath '//meta/status/text()' - 2>/dev/null)
         if [ "$status" = "ok" ]; then
             verbose "Successfully created user: $userid"
-            # Set display name
-            verbose "Setting display name for $userid..."
-            response=$(curl -s -X PUT "https://${ENCODED_USER}:${ENCODED_PASS}@${NC_URL}/ocs/v1.php/cloud/users/${encoded_userid}" \
-                -d "key=displayname" \
-                -d "value=$encoded_display_name" \
-                -H "OCS-APIRequest: true")
-            
-            status=$(echo "$response" | xmllint --xpath '//meta/status/text()' - 2>/dev/null)
-            if [ "$status" = "ok" ]; then
-                verbose "Successfully set display name to: $display_name"
-                ((created_success++))
-            else
-                message=$(echo "$response" | xmllint --xpath '//meta/message/text()' - 2>/dev/null)
-                echo "[WARNING] Created user but failed to set display name for $userid: $message"
-                ((created_success++))
-                ((error_reasons["Failed to set display name: $message"]++))
+            # Set display name with retry logic
+            if ! set_display_name "$userid" "$display_name" "$encoded_userid" "$encoded_display_name"; then
+                print_summary
+                exit 1
             fi
+            ((created_success++))
         else
             message=$(echo "$response" | xmllint --xpath '//meta/message/text()' - 2>/dev/null)
-            echo "[WARNING] Failed to create user $userid (email: $email): $message"
-            ((created_failed++))
-            ((error_reasons["$message"]++))
+            echo "[ERROR] Failed to create user $userid (email: $email): $message"
+            print_summary
+            exit 1
         fi
     else
         verbose "Would create user: $userid (display name: $display_name, email: $email) (dry run)"
@@ -329,27 +384,6 @@ while IFS=',' read -r -a fields; do
     
 done < <(tail -n +2 "$CSV_FILE")
 
-# Print summary
-echo
-echo "=== Summary ==="
-echo "Total records processed: $total_processed"
-if [ "$DO_CREATE" = true ]; then
-    echo "Users successfully created: $created_success"
-else
-    echo "Users that would be created: $created_success"
-fi
-echo "Users skipped (no email): $skipped_no_email"
-echo "Users skipped (existing email): $skipped_existing_email"
-echo "Users skipped (existing external ID as userid): $skipped_existing_external_id"
-echo "Users skipped (existing display name as userid): $skipped_existing_userid"
-echo "Failed creation attempts: $created_failed"
-
-if [ ${#error_reasons[@]} -gt 0 ]; then
-    echo
-    echo "Error breakdown:"
-    for reason in "${!error_reasons[@]}"; do
-        echo "  - $reason: ${error_reasons[$reason]}"
-    done
-fi
+print_summary
 
 verbose "Processing complete" 

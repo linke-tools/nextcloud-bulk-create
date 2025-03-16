@@ -1,14 +1,22 @@
-# Nextcloud instance URL (without https://)
-NC_URL="cloud.example.com"
+# Nextcloud server URL (without https://)
+# Example: cloud.example.com
+NC_URL=nextcloud.example.com
 
-# Admin username for Nextcloud
-NC_USER="admin"
-
-# Admin password for Nextcloud
-NC_PASS="your_secure_password"
+# Admin user credentials
+# The user must have admin privileges to create users
+NC_USER=admin
+NC_PASS=password
 
 # Default group for new users
-NC_GROUP="Default Group" 
+# All created users will be added to this group
+NC_GROUP=users
 
-# Suffix for userid
-NC_USERID_SUFFIX=""
+# Suffix to append to userids
+# Example: @example.com will create users like "john.doe@example.com"
+NC_USERID_SUFFIX=@example.com
+
+# Rate limiting retry settings
+# NC_RETRY_COUNT: Number of retries when hitting rate limits (first attempt + N retries)
+# NC_RETRY_INTERVAL: Seconds to wait between retries (recommended: 180 or higher)
+NC_RETRY_COUNT=3
+NC_RETRY_INTERVAL=180
